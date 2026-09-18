@@ -316,7 +316,7 @@ with tab1:
         st.plotly_chart(fig_hist, use_container_width=True)
 
     with st.expander("📊 Xem Bảng Thống Kê Mô Tả (Descriptive Statistics)"):
-        st.dataframe(df_active.describe().T.style.format("{:.3f}"), use_container_width=True)
+        st.dataframe(df_active.describe().T.round(3), use_container_width=True)
 
 # ==============================================================================
 # TAB 2: HUẤN LUYỆN & ĐÁNH GIÁ MÔ HÌNH
@@ -336,8 +336,15 @@ with tab2:
                 return 'color: #16A34A; font-weight: bold;'
         return ''
 
+    # Xử lý Styler tương thích với mọi phiên bản Pandas (Pandas >= 2.1 dùng .map, bản cũ dùng .applymap)
+    styler = coef_df.style
+    if hasattr(styler, 'map'):
+        styler = styler.map(highlight_beta, subset=['Hệ số (Beta)'])
+    elif hasattr(styler, 'applymap'):
+        styler = styler.applymap(highlight_beta, subset=['Hệ số (Beta)'])
+
     st.dataframe(
-        coef_df.style.applymap(highlight_beta, subset=['Hệ số (Beta)']).format({
+        styler.format({
             'Hệ số (Beta)': '{:.4f}',
             'Tỷ số chênh (Odds Ratio)': '{:.4f}'
         }),
