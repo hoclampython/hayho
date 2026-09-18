@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
 HỆ THỐNG DỰ BÁO VÀ PHÂN TÍCH GIAN LẬN BÁO CÁO TÀI CHÍNH (BCTC)
-Sử dụng Mô hình Beneish M-Score & Hồi quy Logistic (Logistic Regression)
+Sử dụng Mô hình Beneish M-Score, Hồi quy Logistic & XGBoost Classifier
 Tác giả: Chuyên gia Phân tích Dữ liệu Tài chính & Web App
 """
 
@@ -16,6 +16,7 @@ from sklearn.metrics import (
     confusion_matrix, classification_report, accuracy_score,
     precision_score, recall_score, f1_score, roc_auc_score, roc_curve
 )
+import xgboost as xgb
 import plotly.express as px
 import plotly.graph_objects as go
 
@@ -23,7 +24,7 @@ import plotly.graph_objects as go
 # CẤU HÌNH TRANG STREAMLIT
 # ==============================================================================
 st.set_page_config(
-    page_title="Phân Tích Gian Lận BCTC | Beneish M-Score AI",
+    page_title="Phân Tích Gian Lận BCTC | Beneish M-Score & XGBoost AI",
     page_icon="📊",
     layout="wide",
     initial_sidebar_state="expanded"
@@ -122,9 +123,23 @@ def load_default_dataset():
         return pd.read_csv(default_path)
     return None
 
+def compute_metrics(y_true, y_pred, y_proba):
+    """Hàm tính toán các chỉ số đo lường hiệu năng."""
+    acc = accuracy_score(y_true, y_pred)
+    prec = precision_score(y_true, y_pred, zero_division=0)
+    rec = recall_score(y_true, y_pred, zero_division=0)
+    f1 = f1_score(y_true, y_pred, zero_division=0)
+    auc = roc_auc_score(y_true, y_proba)
+    cm = confusion_matrix(y_true, y_pred)
+    fpr, tpr, _ = roc_curve(y_true, y_proba)
+    return {
+        'accuracy': acc, 'precision': prec, 'recall': rec,
+        'f1': f1, 'auc': auc, 'cm': cm, 'fpr': fpr, 'tpr': tpr
+    }
+
 @st.cache_data
-def train_logistic_model(data_df, test_size=0.20, random_state=42, c_param=1.0):
-    """Huấn luyện mô hình Logistic Regression tương tự notebook test.py."""
+def train_models(data_df, test_size=0.20, random_state=42, c_param=1.0, n_estimators=100, max_depth=3, learning_rate=0.1):
+    """Huấn luyện cả Logistic Regression và XGBoost Classifier."""
     X = data_df[FEATURE_COLS]
     y = data_df['FRAUD_FLAG']
 
@@ -132,16 +147,16 @@ def train_logistic_model(data_df, test_size=0.20, random_state=42, c_param=1.0):
         X, y, test_size=test_size, random_state=random_state, stratify=y
     )
 
-    model = LogisticRegression(C=c_param, random_state=random_state, max_iter=1000)
-    model.fit(X_train, y_train)
+    # 1. Logistic Regression
+    lr_model = LogisticRegression(C=c_param, random_state=random_state, max_iter=1000)
+    lr_model.fit(X_train, y_train)
+    lr_pred = lr_model.predict(X_test)
+    lr_proba = lr_model.predict_proba(X_test)[:, 1]
+    lr_metrics = compute_metrics(y_test, lr_pred, lr_proba)
 
-    y_pred = model.predict(X_test)
-    y_proba = model.predict_proba(X_test)[:, 1]
-
-    # Bảng hệ số hồi quy
-    intercept = model.intercept_[0]
-    coefficients = model.coef_[0]
-
+    # Bảng hệ số hồi quy Logistic
+    intercept = lr_model.intercept_[0]
+    coefficients = lr_model.coef_[0]
     coef_df = pd.DataFrame({
         'Chỉ số / Biến': ['Hệ số chặn (Intercept)'] + FEATURE_COLS,
         'Hệ số (Beta)': [intercept] + list(coefficients),
@@ -149,29 +164,33 @@ def train_logistic_model(data_df, test_size=0.20, random_state=42, c_param=1.0):
     })
     coef_df['Ý nghĩa kinh tế trong phát hiện gian lận'] = coef_df['Chỉ số / Biến'].map(MEANING_MAP)
 
-    # Đánh giá metrics
-    acc = accuracy_score(y_test, y_pred)
-    prec = precision_score(y_test, y_pred, zero_division=0)
-    rec = recall_score(y_test, y_pred, zero_division=0)
-    f1 = f1_score(y_test, y_pred, zero_division=0)
-    auc = roc_auc_score(y_test, y_proba)
-    cm = confusion_matrix(y_test, y_pred)
-    fpr, tpr, _ = roc_curve(y_test, y_proba)
+    # 2. XGBoost Classifier
+    xgb_model = xgb.XGBClassifier(
+        n_estimators=n_estimators,
+        max_depth=max_depth,
+        learning_rate=learning_rate,
+        random_state=random_state,
+        eval_metric='logloss'
+    )
+    xgb_model.fit(X_train, y_train)
+    xgb_pred = xgb_model.predict(X_test)
+    xgb_proba = xgb_model.predict_proba(X_test)[:, 1]
+    xgb_metrics = compute_metrics(y_test, xgb_pred, xgb_proba)
 
-    metrics = {
-        'accuracy': acc,
-        'precision': prec,
-        'recall': rec,
-        'f1': f1,
-        'auc': auc,
-        'cm': cm,
-        'fpr': fpr,
-        'tpr': tpr,
-        'train_size': len(X_train),
-        'test_size': len(X_test)
+    # Mức độ quan trọng của biến (Feature Importance) XGBoost
+    importance_df = pd.DataFrame({
+        'Chỉ số / Biến': FEATURE_COLS,
+        'Feature Importance': xgb_model.feature_importances_
+    }).sort_values(by='Feature Importance', ascending=False)
+    importance_df['Ý nghĩa kinh tế'] = importance_df['Chỉ số / Biến'].map(MEANING_MAP)
+
+    data_splits = (X_train, X_test, y_train, y_test)
+    
+    return {
+        'lr': (lr_model, coef_df, lr_metrics),
+        'xgb': (xgb_model, importance_df, xgb_metrics),
+        'splits': data_splits
     }
-
-    return model, coef_df, metrics, (X_train, X_test, y_train, y_test)
 
 # ==============================================================================
 # SIDEBAR QUẢN LÝ DỮ LIỆU & THIẾT LẬP
@@ -203,14 +222,21 @@ with st.sidebar:
                 st.error(f"Lỗi khi đọc file: {e}")
 
     st.markdown("---")
-    st.markdown("### **Tham số Huấn luyện**")
+    st.markdown("### **Tham số Huấn luyện Chung**")
     test_pct = st.slider("Tỷ lệ tập kiểm tra (Test Size)", min_value=0.10, max_value=0.40, value=0.20, step=0.05)
-    random_seed = st.number_input("Random State (Cố định ngẫu nhiên)", min_value=1, max_value=999, value=42)
-    c_regularization = st.selectbox("Tham số điều chuẩn C (Inverse Regularization)", [0.01, 0.1, 1.0, 10.0, 100.0], index=2)
+    random_seed = st.number_input("Random State", min_value=1, max_value=999, value=42)
+    
+    st.markdown("### **Tham số Logistic Regression**")
+    c_regularization = st.selectbox("Điều chuẩn C (Inverse Regularization)", [0.01, 0.1, 1.0, 10.0, 100.0], index=2)
+
+    st.markdown("### **Tham số XGBoost**")
+    xgb_n_estimators = st.slider("Số lượng cây (n_estimators)", min_value=10, max_value=300, value=100, step=10)
+    xgb_max_depth = st.slider("Độ sâu tối đa cây (max_depth)", min_value=1, max_value=10, value=3, step=1)
+    xgb_lr = st.selectbox("Tốc độ học (learning_rate)", [0.01, 0.05, 0.1, 0.2, 0.3], index=2)
 
     st.markdown("---")
     st.markdown("💡 **Thông tin mô hình:**")
-    st.caption("Ứng dụng kết hợp giữa **Mô hình Beneish M-Score cổ điển** và thuật toán **Hồi quy Logistic Machine Learning** để phát hiện gian lận báo cáo tài chính doanh nghiệp.")
+    st.caption("Ứng dụng kết hợp giữa **Beneish M-Score cổ điển**, **Logistic Regression** và thuật toán Boosting tiên tiến **XGBoost** để phát hiện gian lận báo cáo tài chính.")
 
 # ==============================================================================
 # KIỂM TRA ĐIỀU KIỆN DỮ LIỆU ĐỂ HUẤN LUYỆN
@@ -224,30 +250,36 @@ if missing_cols:
     st.error(f"❌ Dữ liệu đang thiếu các cột bắt buộc: {missing_cols}. Vui lòng kiểm tra lại cấu trúc file!")
     st.stop()
 
-# Huấn luyện mô hình
-model, coef_df, metrics, data_splits = train_logistic_model(
-    df_active, test_size=test_pct, random_state=random_seed, c_param=c_regularization
+# Huấn luyện các mô hình
+model_results = train_models(
+    df_active, test_size=test_pct, random_state=random_seed,
+    c_param=c_regularization, n_estimators=xgb_n_estimators,
+    max_depth=xgb_max_depth, learning_rate=xgb_lr
 )
+
+lr_model, coef_df, lr_metrics = model_results['lr']
+xgb_model, importance_df, xgb_metrics = model_results['xgb']
+X_train, X_test, y_train, y_test = model_results['splits']
 
 # ==============================================================================
 # GIAO DIỆN CHÍNH - HEADER & TABS
 # ==============================================================================
 st.markdown('<div class="main-title">HỆ THỐNG DỰ BÁO RỦI RO GIAN LẬN BÁO CÁO TÀI CHÍNH</div>', unsafe_allow_html=True)
-st.markdown('<div class="sub-title">Ứng dụng Khoa học Dữ liệu & Mô hình Beneish M-Score trong Kiểm toán, Ngân hàng và Đầu tư</div>', unsafe_allow_html=True)
+st.markdown('<div class="sub-title">Ứng dụng Khoa học Dữ liệu (Logistic Regression & XGBoost) và Mô hình Beneish M-Score trong Kiểm toán, Ngân hàng</div>', unsafe_allow_html=True)
 
-# Thanh tóm tắt nhanh
+# Thanh tóm tắt nhanh hiệu năng (So sánh LR vs XGBoost)
 col_m1, col_m2, col_m3, col_m4, col_m5 = st.columns(5)
 with col_m1:
     st.metric("Tổng số doanh nghiệp", f"{len(df_active):,} DN")
 with col_m2:
     fraud_count = df_active['FRAUD_FLAG'].sum()
-    st.metric("DN có dấu hiệu gian lận", f"{fraud_count} DN", f"{fraud_count/len(df_active)*100:.1f}%", delta_color="inverse")
+    st.metric("DN gian lận (Thực tế)", f"{fraud_count} DN", f"{fraud_count/len(df_active)*100:.1f}%", delta_color="inverse")
 with col_m3:
-    st.metric("Độ chính xác (Accuracy)", f"{metrics['accuracy']*100:.2f}%")
+    st.metric("Accuracy (LR vs XGB)", f"{lr_metrics['accuracy']*100:.1f}% | {xgb_metrics['accuracy']*100:.1f}%")
 with col_m4:
-    st.metric("Độ nhạy (Recall)", f"{metrics['recall']*100:.2f}%")
+    st.metric("Recall (LR vs XGB)", f"{lr_metrics['recall']*100:.1f}% | {xgb_metrics['recall']*100:.1f}%")
 with col_m5:
-    st.metric("Chỉ số AUC - ROC", f"{metrics['auc']:.4f}")
+    st.metric("AUC - ROC (LR vs XGB)", f"{lr_metrics['auc']:.3f} | {xgb_metrics['auc']:.3f}")
 
 # Các Tab chức năng
 tab1, tab2, tab3, tab4, tab5 = st.tabs([
@@ -319,101 +351,127 @@ with tab1:
         st.dataframe(df_active.describe().T.round(3), use_container_width=True)
 
 # ==============================================================================
-# TAB 2: HUẤN LUYỆN & ĐÁNH GIÁ MÔ HÌNH
+# TAB 2: HUẤN LUYỆN & ĐÁNH GIÁ MÔ HÌNH (SO SÁNH LOGISTIC REGRESSION & XGBOOST)
 # ==============================================================================
 with tab2:
-    st.subheader("1. Bảng Hệ Số Hồi Quy Logistic & Tỷ Số Chênh (Odds Ratio)")
-    st.markdown("""
-    - **Hệ số Beta > 0**: Chỉ số tăng làm **tăng** xác suất gian lận BCTC.
-    - **Tỷ số chênh (Odds Ratio) = exp(Beta)**: Cho biết mức tăng số lần nguy cơ gian lận khi chỉ số tăng thêm 1 đơn vị.
-    """)
+    st.subheader("1. Đặc Tính & Hệ Số/Mức Đội Quan Trọng Của Biến Trong Mô Hình")
     
-    def highlight_beta(val):
-        if isinstance(val, (int, float)):
-            if val > 0:
-                return 'color: #DC2626; font-weight: bold;'
-            elif val < 0:
-                return 'color: #16A34A; font-weight: bold;'
-        return ''
+    tab_lr_exp, tab_xgb_exp = st.tabs(["📌 Logistic Regression (Hệ số Beta)", "🌲 XGBoost (Feature Importance)"])
+    
+    with tab_lr_exp:
+        def highlight_beta(val):
+            if isinstance(val, (int, float)):
+                if val > 0:
+                    return 'color: #DC2626; font-weight: bold;'
+                elif val < 0:
+                    return 'color: #16A34A; font-weight: bold;'
+            return ''
 
-    # Xử lý Styler tương thích với mọi phiên bản Pandas (Pandas >= 2.1 dùng .map, bản cũ dùng .applymap)
-    styler = coef_df.style
-    if hasattr(styler, 'map'):
-        styler = styler.map(highlight_beta, subset=['Hệ số (Beta)'])
-    elif hasattr(styler, 'applymap'):
-        styler = styler.applymap(highlight_beta, subset=['Hệ số (Beta)'])
+        styler = coef_df.style
+        if hasattr(styler, 'map'):
+            styler = styler.map(highlight_beta, subset=['Hệ số (Beta)'])
+        elif hasattr(styler, 'applymap'):
+            styler = styler.applymap(highlight_beta, subset=['Hệ số (Beta)'])
 
-    st.dataframe(
-        styler.format({
-            'Hệ số (Beta)': '{:.4f}',
-            'Tỷ số chênh (Odds Ratio)': '{:.4f}'
-        }),
-        use_container_width=True
-    )
+        st.dataframe(
+            styler.format({'Hệ số (Beta)': '{:.4f}', 'Tỷ số chênh (Odds Ratio)': '{:.4f}'}),
+            use_container_width=True
+        )
+
+    with tab_xgb_exp:
+        col_xgb_fi, col_xgb_chart = st.columns([1, 1])
+        with col_xgb_fi:
+            st.dataframe(
+                importance_df.style.format({'Feature Importance': '{:.4f}'}),
+                use_container_width=True
+            )
+        with col_xgb_chart:
+            fig_fi = px.bar(
+                importance_df, x='Feature Importance', y='Chỉ số / Biến', orientation='h',
+                title="Mức Độ Quan Trọng Của Biến Theo XGBoost",
+                color='Feature Importance', color_continuous_scale='Viridis'
+            )
+            fig_fi.update_layout(yaxis=dict(autorange="reversed"), height=300)
+            st.plotly_chart(fig_fi, use_container_width=True)
 
     st.markdown("---")
-    st.subheader("2. Đánh Giá Hiệu Năng Trên Tập Kiểm Thử (Test Set 20%)")
+    st.subheader("2. Đánh Giá Hiệu Năng Chi Tiết Trên Tập Kiểm Thử (Test Set)")
     
-    col_cm, col_roc = st.columns(2)
+    col_cm_lr, col_cm_xgb = st.columns(2)
     
-    with col_cm:
-        st.markdown("**Ma trận Nhầm lẫn (Confusion Matrix):**")
-        cm = metrics['cm']
-        cm_labels_x = ['Dự báo An toàn (0)', 'Dự báo Gian lận (1)']
-        cm_labels_y = ['Thực tế An toàn (0)', 'Thực tế Gian lận (1)']
-        
-        fig_cm = px.imshow(
-            cm,
-            x=cm_labels_x,
-            y=cm_labels_y,
+    with col_cm_lr:
+        st.markdown("**Ma trận Nhầm lẫn (Logistic Regression):**")
+        fig_cm_lr = px.imshow(
+            lr_metrics['cm'],
+            x=['Dự báo An toàn (0)', 'Dự báo Gian lận (1)'],
+            y=['Thực tế An toàn (0)', 'Thực tế Gian lận (1)'],
             color_continuous_scale='Blues',
-            text_auto=True,
-            title="Confusion Matrix"
+            text_auto=True, title="Confusion Matrix - Logistic Regression"
         )
-        fig_cm.update_layout(height=380, margin=dict(t=40, b=20, l=20, r=20))
-        st.plotly_chart(fig_cm, use_container_width=True)
+        fig_cm_lr.update_layout(height=340, margin=dict(t=40, b=20, l=20, r=20))
+        st.plotly_chart(fig_cm_lr, use_container_width=True)
 
-    with col_roc:
-        st.markdown(f"**Đường Cong ROC (AUC = {metrics['auc']:.4f}):**")
-        fig_roc = go.Figure()
-        fig_roc.add_trace(go.Scatter(
-            x=metrics['fpr'], y=metrics['tpr'],
-            mode='lines',
-            name=f'Logistic Regression (AUC = {metrics["auc"]:.4f})',
-            line=dict(color='#2563EB', width=3)
-        ))
-        fig_roc.add_trace(go.Scatter(
-            x=[0, 1], y=[0, 1],
-            mode='lines',
-            name='Random Guess (Đường ngẫu nhiên)',
-            line=dict(color='#9CA3AF', dash='dash', width=2)
-        ))
-        fig_roc.update_layout(
-            xaxis_title='Tỷ lệ Báo động giả (False Positive Rate)',
-            yaxis_title='Tỷ lệ Phát hiện gian lận (True Positive Rate)',
-            title="Đường cong ROC Curve",
-            height=380,
-            margin=dict(t=40, b=20, l=20, r=20)
+    with col_cm_xgb:
+        st.markdown("**Ma trận Nhầm lẫn (XGBoost Classifier):**")
+        fig_cm_xgb = px.imshow(
+            xgb_metrics['cm'],
+            x=['Dự báo An toàn (0)', 'Dự báo Gian lận (1)'],
+            y=['Thực tế An toàn (0)', 'Thực tế Gian lận (1)'],
+            color_continuous_scale='Oranges',
+            text_auto=True, title="Confusion Matrix - XGBoost Classifier"
         )
-        st.plotly_chart(fig_roc, use_container_width=True)
+        fig_cm_xgb.update_layout(height=340, margin=dict(t=40, b=20, l=20, r=20))
+        st.plotly_chart(fig_cm_xgb, use_container_width=True)
 
     st.markdown("---")
-    st.subheader("3. Bảng Tóm Tắt Các Chỉ Số Đo Lường")
+    st.markdown("**So Sánh Đường Cong ROC (ROC Curve Comparison):**")
+    fig_roc = go.Figure()
+    fig_roc.add_trace(go.Scatter(
+        x=lr_metrics['fpr'], y=lr_metrics['tpr'],
+        mode='lines', name=f'Logistic Regression (AUC = {lr_metrics["auc"]:.4f})',
+        line=dict(color='#2563EB', width=3)
+    ))
+    fig_roc.add_trace(go.Scatter(
+        x=xgb_metrics['fpr'], y=xgb_metrics['tpr'],
+        mode='lines', name=f'XGBoost Classifier (AUC = {xgb_metrics["auc"]:.4f})',
+        line=dict(color='#D97706', width=3)
+    ))
+    fig_roc.add_trace(go.Scatter(
+        x=[0, 1], y=[0, 1], mode='lines', name='Random Guess',
+        line=dict(color='#9CA3AF', dash='dash', width=2)
+    ))
+    fig_roc.update_layout(
+        xaxis_title='Tỷ lệ Báo động giả (False Positive Rate)',
+        yaxis_title='Tỷ lệ Phát hiện gian lận (True Positive Rate)',
+        title="Đường cong ROC Curve So Sánh Giữa Logistic Regression & XGBoost",
+        height=400, margin=dict(t=40, b=20, l=20, r=20)
+    )
+    st.plotly_chart(fig_roc, use_container_width=True)
+
+    st.markdown("---")
+    st.subheader("3. Bảng Bảng So Sánh Chỉ Số Hiệu Năng Mô Hình")
     summary_df = pd.DataFrame({
-        'Chỉ số Đánh Giá': ['Accuracy (Độ chính xác toàn diện)', 'Precision (Độ chuẩn xác khi phát hiện gian lận)', 'Recall / Sensitivity (Tỷ lệ bắt đúng gian lận)', 'F1-Score (Cân bằng Precision & Recall)', 'AUC - ROC (Khả năng phân loại tổng thể)'],
-        'Giá trị': [
-            f"{metrics['accuracy']:.4f} ({metrics['accuracy']*100:.2f}%)",
-            f"{metrics['precision']:.4f} ({metrics['precision']*100:.2f}%)",
-            f"{metrics['recall']:.4f} ({metrics['recall']*100:.2f}%)",
-            f"{metrics['f1']:.4f}",
-            f"{metrics['auc']:.4f}"
+        'Chỉ số Đánh Giá': ['Accuracy', 'Precision', 'Recall / Sensitivity', 'F1-Score', 'AUC - ROC'],
+        'Logistic Regression': [
+            f"{lr_metrics['accuracy']:.4f} ({lr_metrics['accuracy']*100:.2f}%)",
+            f"{lr_metrics['precision']:.4f}",
+            f"{lr_metrics['recall']:.4f}",
+            f"{lr_metrics['f1']:.4f}",
+            f"{lr_metrics['auc']:.4f}"
         ],
-        'Khuyến nghị / Diễn giải nghiệp vụ': [
-            'Tỷ lệ dự báo đúng trên toàn bộ mẫu kiểm tra',
-            'Khi mô hình báo một DN gian lận, xác suất DN đó thực sự gian lận',
-            'Trong 100 vụ gian lận thực tế, mô hình phát hiện được bao nhiêu vụ (Cực kỳ quan trọng để tránh lọt tội)',
-            'Điểm trung bình điều hòa, đặc biệt quan trọng với dữ liệu mất cân bằng',
-            'AUC > 0.8 biểu thị mô hình có khả năng phân biệt rủi ro rất xuất sắc'
+        'XGBoost Classifier': [
+            f"{xgb_metrics['accuracy']:.4f} ({xgb_metrics['accuracy']*100:.2f}%)",
+            f"{xgb_metrics['precision']:.4f}",
+            f"{xgb_metrics['recall']:.4f}",
+            f"{xgb_metrics['f1']:.4f}",
+            f"{xgb_metrics['auc']:.4f}"
+        ],
+        'Ý nghĩa Kiểm toán & Quản trị Rủi ro': [
+            'Tỷ lệ dự báo đúng tổng thể trên toàn bộ mẫu kiểm tra',
+            'Xác suất gian lận thực sự khi mô hình phát cờ cảnh báo',
+            'Khả năng bắt trúng các vụ gian lận thực tế (Tránh lọt tội)',
+            'Điểm trung bình điều hòa giữa Precision và Recall',
+            'Khả năng phân biệt doanh nghiệp An toàn vs Gian lận'
         ]
     })
     st.table(summary_df)
@@ -427,25 +485,21 @@ with tab3:
 
     # Nút chọn kịch bản mẫu
     col_demo1, col_demo2, col_demo3 = st.columns(3)
-    preset_vals = None
-    with col_demo1:
-        if st.button("🟢 Tải mẫu: DN Tài Chính Lành Mạnh"):
-            st.session_state.custom_inputs = {
-                'DSRI': 0.75, 'GMI': 0.95, 'AQI': 0.70, 'SGI': 1.05,
-                'DEPI': 0.90, 'SGAI': 0.95, 'TATA': 0.02, 'LVGI': 0.90
-            }
-    with col_demo2:
-        if st.button("🔴 Tải mẫu: DN Nguy Cơ Gian Lận Rất Cao"):
-            st.session_state.custom_inputs = {
-                'DSRI': 1.85, 'GMI': 1.70, 'AQI': 1.45, 'SGI': 1.65,
-                'DEPI': 1.30, 'SGAI': 1.35, 'TATA': 0.18, 'LVGI': 1.40
-            }
-    with col_demo3:
-        if st.button("🟡 Tải mẫu: DN Vùng Ranh Giới (Borderline)"):
-            st.session_state.custom_inputs = {
-                'DSRI': 1.25, 'GMI': 1.15, 'AQI': 1.05, 'SGI': 1.20,
-                'DEPI': 1.05, 'SGAI': 1.10, 'TATA': 0.08, 'LVGI': 1.10
-            }
+    if col_demo1.button("🟢 Tải mẫu: DN Tài Chính Lành Mạnh"):
+        st.session_state.custom_inputs = {
+            'DSRI': 0.75, 'GMI': 0.95, 'AQI': 0.70, 'SGI': 1.05,
+            'DEPI': 0.90, 'SGAI': 0.95, 'TATA': 0.02, 'LVGI': 0.90
+        }
+    if col_demo2.button("🔴 Tải mẫu: DN Nguy Cơ Gian Lận Rất Cao"):
+        st.session_state.custom_inputs = {
+            'DSRI': 1.85, 'GMI': 1.70, 'AQI': 1.45, 'SGI': 1.65,
+            'DEPI': 1.30, 'SGAI': 1.35, 'TATA': 0.18, 'LVGI': 1.40
+        }
+    if col_demo3.button("🟡 Tải mẫu: DN Vùng Ranh Giới (Borderline)"):
+        st.session_state.custom_inputs = {
+            'DSRI': 1.25, 'GMI': 1.15, 'AQI': 1.05, 'SGI': 1.20,
+            'DEPI': 1.05, 'SGAI': 1.10, 'TATA': 0.08, 'LVGI': 1.10
+        }
 
     if 'custom_inputs' not in st.session_state:
         st.session_state.custom_inputs = {
@@ -477,64 +531,41 @@ with tab3:
         'DEPI': val_depi, 'SGAI': val_sgai, 'TATA': val_tata, 'LVGI': val_lvgi
     }
 
-    # Tính toán kết quả
+    # Tính toán dự báo cho 3 phương pháp
     input_df = pd.DataFrame([input_data])
-    prob_fraud = model.predict_proba(input_df)[0, 1]
-    pred_class = model.predict(input_df)[0]
+    lr_prob = lr_model.predict_proba(input_df)[0, 1]
+    xgb_prob = xgb_model.predict_proba(input_df)[0, 1]
     m_score_val = calculate_beneish_mscore(input_data)
 
     st.markdown("---")
-    st.subheader("Kết Quả Phân Tích Tổng Hợp")
+    st.subheader("Kết Quả Phân Tích Đa Mô Hình")
 
-    col_res1, col_res2, col_res3 = st.columns([2, 2, 3])
+    col_res1, col_res2, col_res3 = st.columns(3)
     
     with col_res1:
-        st.markdown("**Mô Hình Machine Learning:**")
-        if prob_fraud >= 0.5:
-            st.markdown(f"<div class='metric-card' style='border-left-color: #EF4444;'><h4>Xác suất Gian lận</h4><h2 style='color:#EF4444;'>{prob_fraud*100:.1f}%</h2><span class='badge-fraud'>⚠️ CẢNH BÁO NGUY CƠ CAO</span></div>", unsafe_allow_html=True)
+        st.markdown("**1. Logistic Regression:**")
+        if lr_prob >= 0.5:
+            st.markdown(f"<div class='metric-card' style='border-left-color: #EF4444;'><h4>Xác suất Gian lận</h4><h2 style='color:#EF4444;'>{lr_prob*100:.1f}%</h2><span class='badge-fraud'>⚠️ CẢNH BÁO NGUY CƠ CAO</span></div>", unsafe_allow_html=True)
         else:
-            st.markdown(f"<div class='metric-card' style='border-left-color: #10B981;'><h4>Xác suất Gian lận</h4><h2 style='color:#10B981;'>{prob_fraud*100:.1f}%</h2><span class='badge-safe'>✅ BCTC AN TOÀN</span></div>", unsafe_allow_html=True)
+            st.markdown(f"<div class='metric-card' style='border-left-color: #10B981;'><h4>Xác suất Gian lận</h4><h2 style='color:#10B981;'>{lr_prob*100:.1f}%</h2><span class='badge-safe'>✅ BCTC AN TOÀN</span></div>", unsafe_allow_html=True)
 
     with col_res2:
-        st.markdown("**Thang Đo Beneish M-Score (1999):**")
+        st.markdown("**2. XGBoost Classifier:**")
+        if xgb_prob >= 0.5:
+            st.markdown(f"<div class='metric-card' style='border-left-color: #EF4444;'><h4>Xác suất Gian lận</h4><h2 style='color:#EF4444;'>{xgb_prob*100:.1f}%</h2><span class='badge-fraud'>⚠️ CẢNH BÁO NGUY CƠ CAO</span></div>", unsafe_allow_html=True)
+        else:
+            st.markdown(f"<div class='metric-card' style='border-left-color: #10B981;'><h4>Xác suất Gian lận</h4><h2 style='color:#10B981;'>{xgb_prob*100:.1f}%</h2><span class='badge-safe'>✅ BCTC AN TOÀN</span></div>", unsafe_allow_html=True)
+
+    with col_res3:
+        st.markdown("**3. Beneish M-Score (1999):**")
         if m_score_val > BENEISH_CUTOFF:
-            st.markdown(f"<div class='metric-card' style='border-left-color: #EF4444;'><h4>Điểm M-Score</h4><h2 style='color:#EF4444;'>{m_score_val:.3f}</h2><span class='badge-fraud'>CÓ DẤU HIỆU THAO TÚNG</span><br><small>(Ngưỡng rủi ro > -1.78)</small></div>", unsafe_allow_html=True)
+            st.markdown(f"<div class='metric-card' style='border-left-color: #EF4444;'><h4>Điểm M-Score</h4><h2 style='color:#EF4444;'>{m_score_val:.3f}</h2><span class='badge-fraud'>CÓ DẤU HIỆU THAO TÚNG</span><br><small>(M-Score > -1.78)</small></div>", unsafe_allow_html=True)
         else:
             st.markdown(f"<div class='metric-card' style='border-left-color: #10B981;'><h4>Điểm M-Score</h4><h2 style='color:#10B981;'>{m_score_val:.3f}</h2><span class='badge-safe'>AN TOÀN / KHÔNG THAO TÚNG</span><br><small>(M-Score ≤ -1.78)</small></div>", unsafe_allow_html=True)
 
-    with col_res3:
-        # Gauge Chart
-        fig_gauge = go.Figure(go.Indicator(
-            mode = "gauge+number",
-            value = prob_fraud * 100,
-            domain = {'x': [0, 1], 'y': [0, 1]},
-            title = {'text': "Đồng Hồ Đo Rủi Ro Gian Lận (%)", 'font': {'size': 16}},
-            gauge = {
-                'axis': {'range': [0, 100], 'tickwidth': 1, 'tickcolor': "darkblue"},
-                'bar': {'color': "#1F2937"},
-                'bgcolor': "white",
-                'borderwidth': 2,
-                'bordercolor': "gray",
-                'steps': [
-                    {'range': [0, 30], 'color': '#A7F3D0'},
-                    {'range': [30, 60], 'color': '#FDE68A'},
-                    {'range': [60, 100], 'color': '#FECACA'}
-                ],
-                'threshold': {
-                    'line': {'color': "red", 'width': 4},
-                    'thickness': 0.75,
-                    'value': 50
-                }
-            }
-        ))
-        fig_gauge.update_layout(height=250, margin=dict(t=30, b=20, l=20, r=20))
-        st.plotly_chart(fig_gauge, use_container_width=True)
-
-    # Đóng góp của từng chỉ số vào Log-Odds
-    st.markdown("### 📊 Phân Tích Đóng Góp Của Từng Chỉ Số (Feature Contribution)")
-    st.caption("Biểu đồ thể hiện mức độ tác động cộng thêm (+) hoặc làm giảm (-) nguy cơ gian lận từ từng chỉ số của DN:")
-    
-    coef_dict = dict(zip(FEATURE_COLS, model.coef_[0]))
+    # Đóng góp của từng chỉ số vào Log-Odds (Logistic Regression)
+    st.markdown("### 📊 Phân Tích Đóng Góp Của Từng Chỉ Số (Logistic Regression)")
+    coef_dict = dict(zip(FEATURE_COLS, lr_model.coef_[0]))
     contributions = {col: input_data[col] * coef_dict[col] for col in FEATURE_COLS}
     contrib_df = pd.DataFrame(list(contributions.items()), columns=['Chỉ số', 'Tác động Log-Odds'])
     contrib_df['Màu sắc'] = contrib_df['Tác động Log-Odds'].apply(lambda x: '#EF4444' if x > 0 else '#10B981')
@@ -543,7 +574,7 @@ with tab3:
     fig_contrib = px.bar(
         contrib_df, x='Tác động Log-Odds', y='Chỉ số', orientation='h',
         color='Màu sắc', color_discrete_map="identity",
-        title="Mức Độ Đóng Góp Vào Rủi Ro Của Từng Biến Tài Chính"
+        title="Mức Độ Đóng Góp Vào Rủi Ro (Tăng (+) / Giảm (-))"
     )
     fig_contrib.update_layout(height=320, showlegend=False)
     st.plotly_chart(fig_contrib, use_container_width=True)
@@ -570,7 +601,7 @@ with tab4:
     
     csv_template = template_df.to_csv(index=False).encode('utf-8')
     st.download_button(
-        label="📥 Tải file mẫu CSV mẫu kiểm tra (Template Batch)",
+        label="📥 Tải file CSV mẫu kiểm tra (Template Batch)",
         data=csv_template,
         file_name="mau_kiem_tra_bctc.csv",
         mime="text/csv"
@@ -589,17 +620,17 @@ with tab4:
                 st.success(f"✅ Đã tải danh sách gồm **{len(batch_data)}** doanh nghiệp!")
                 
                 # Tính toán dự báo
-                batch_probs = model.predict_proba(batch_data[FEATURE_COLS])[:, 1]
-                batch_preds = model.predict(batch_data[FEATURE_COLS])
+                lr_probs = lr_model.predict_proba(batch_data[FEATURE_COLS])[:, 1]
+                xgb_probs = xgb_model.predict_proba(batch_data[FEATURE_COLS])[:, 1]
                 batch_mscores = [calculate_beneish_mscore(row) for _, row in batch_data.iterrows()]
                 
                 result_batch = batch_data.copy()
-                result_batch['Xác suất Gian lận (ML)'] = np.round(batch_probs, 4)
-                result_batch['Phân loại ML'] = np.where(batch_preds == 1, '⚠️ Nguy cơ Gian lận', '✅ An toàn')
+                result_batch['Xác suất (Logistic)'] = np.round(lr_probs, 4)
+                result_batch['Xác suất (XGBoost)'] = np.round(xgb_probs, 4)
+                result_batch['Phân loại (XGBoost)'] = np.where(xgb_probs >= 0.5, '⚠️ Nguy cơ Gian lận', '✅ An toàn')
                 result_batch['Điểm Beneish M-Score'] = np.round(batch_mscores, 3)
                 result_batch['Kết luận Beneish'] = np.where(np.array(batch_mscores) > BENEISH_CUTOFF, 'Thao túng', 'Bình thường')
                 
-                # Mức độ rủi ro tổng hợp
                 def get_risk_level(prob):
                     if prob >= 0.70:
                         return 'Đỏ - Rủi ro Rất cao'
@@ -608,40 +639,40 @@ with tab4:
                     else:
                         return 'Xanh - Rủi ro Thấp'
 
-                result_batch['Cấp độ Rủi ro'] = result_batch['Xác suất Gian lận (ML)'].apply(get_risk_level)
+                result_batch['Cấp độ Rủi ro (XGBoost)'] = result_batch['Xác suất (XGBoost)'].apply(get_risk_level)
 
                 # Hiển thị kết quả
                 st.markdown("### Kết Quả Phân Tích & Chấm Điểm Danh Sách:")
                 st.dataframe(result_batch, use_container_width=True)
 
-                # Biểu đồ phân bổ mức độ rủi ro
+                # Biểu đồ phân bổ mức độ rủi ro & Tương quan
                 col_b1, col_b2 = st.columns(2)
                 with col_b1:
                     fig_risk = px.histogram(
-                        result_batch, x='Cấp độ Rủi ro', color='Cấp độ Rủi ro',
+                        result_batch, x='Cấp độ Rủi ro (XGBoost)', color='Cấp độ Rủi ro (XGBoost)',
                         color_discrete_map={
                             'Đỏ - Rủi ro Rất cao': '#EF4444',
                             'Vàng - Rủi ro Đáng chú ý': '#F59E0B',
                             'Xanh - Rủi ro Thấp': '#10B981'
                         },
-                        title="Phân Bổ Cấp Độ Rủi Ro Danh Sách Doanh Nghiệp"
+                        title="Phân Bổ Cấp Độ Rủi Ro Theo XGBoost"
                     )
                     st.plotly_chart(fig_risk, use_container_width=True)
 
                 with col_b2:
                     fig_scatter = px.scatter(
-                        result_batch, x='Điểm Beneish M-Score', y='Xác suất Gian lận (ML)',
-                        color='Cấp độ Rủi ro',
+                        result_batch, x='Xác suất (Logistic)', y='Xác suất (XGBoost)',
+                        color='Cấp độ Rủi ro (XGBoost)',
                         color_discrete_map={
                             'Đỏ - Rủi ro Rất cao': '#EF4444',
                             'Vàng - Rủi ro Đáng chú ý': '#F59E0B',
                             'Xanh - Rủi ro Thấp': '#10B981'
                         },
-                        title="Tương Quan Giữa Beneish M-Score & Xác Suất ML",
+                        title="Tương Quan Xác Suất Giữa Logistic Regression & XGBoost",
                         hover_data=list(batch_data.columns)
                     )
-                    fig_scatter.add_vline(x=-1.78, line_dash="dash", line_color="red", annotation_text="Ngưỡng M-Score (-1.78)")
-                    fig_scatter.add_hline(y=0.5, line_dash="dash", line_color="blue", annotation_text="Ngưỡng ML (0.5)")
+                    fig_scatter.add_vline(x=0.5, line_dash="dash", line_color="blue", annotation_text="Ngưỡng LR (0.5)")
+                    fig_scatter.add_hline(y=0.5, line_dash="dash", line_color="orange", annotation_text="Ngưỡng XGB (0.5)")
                     st.plotly_chart(fig_scatter, use_container_width=True)
 
                 # Xuất file kết quả
@@ -722,6 +753,6 @@ with tab5:
 # Footer bản quyền
 st.markdown("---")
 st.markdown(
-    "<center><small>Hệ Thống Phân Tích BCTC & Phát Hiện Gian Lận | Phát triển bằng Python & Streamlit | Sẵn sàng triển khai GitHub & Streamlit Cloud</small></center>",
+    "<center><small>Hệ Thống Phân Tích BCTC & Phát Hiện Gian Lận | Kết hợp Beneish, Logistic Regression & XGBoost Classifier | Streamlit App</small></center>",
     unsafe_allow_html=True
 )
